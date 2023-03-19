@@ -4,39 +4,52 @@
 #include <linux/init.h>
 #include <linux/kdev_t.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
+
+#include "bn.h"
+
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
 MODULE_DESCRIPTION("Fibonacci engine driver");
-MODULE_VERSION("0.1");
+MODULE_VERSION("0.1.1");
 
 #define DEV_FIBONACCI_NAME "fibonacci"
 
 /* MAX_LENGTH is set to 92 because
  * ssize_t can't fit the number > 92
  */
-#define MAX_LENGTH 92
+#define MAX_LENGTH 1000
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
+static ktime_t kt;
 
-static long long fib_sequence(long long k)
+void fib_sequence(bn *dest, long long k)
 {
-    /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
-    long long f[k + 2];
-
-    f[0] = 0;
-    f[1] = 1;
-
-    for (int i = 2; i <= k; i++) {
-        f[i] = f[i - 1] + f[i - 2];
+    // bn *fib = kmalloc((k + 2) * sizeof(bn), GFP_KERNEL);
+    bn_resize(dest, 1);
+    if (k < 2) {
+        dest->number[0] = k;
+        return;
     }
 
-    return f[k];
+    bn *a = bn_alloc(1);
+    bn *b = bn_alloc(1);
+    dest->number[0] = 1;
+
+    for (size_t i = 1; i < k; i++) {
+        bn_swap(b, dest);
+        bn_add(a, b, dest);
+        bn_swap(a, b);
+    }
+    bn_free(a);
+    bn_free(b);
 }
 
 static int fib_open(struct inode *inode, struct file *file)
@@ -54,13 +67,58 @@ static int fib_release(struct inode *inode, struct file *file)
     return 0;
 }
 
+// static long long fib_time_proxy(long long k, char *buf, int flag)
+// {
+//     bn *result = bn_alloc(1);
+//     kt = ktime_get();
+//     switch (flag)
+//     {
+//     case 0:
+//         fib_sequence(result, k);
+//         break;
+
+//     default:
+//         break;
+//     }
+//     char *p = bn_to_string(*result);
+//     size_t len = strlen(p) + 1;
+//     // char *s = kmalloc(2, GFP_KERNEL);
+//     // s[0] = result->size + '0';
+//     // __copy_to_user(buf, s, 3);
+//     __copy_to_user(buf, p, len);
+//     kt = ktime_sub(ktime_get(), kt);
+//     bn_free(result);
+//     kfree(p);
+
+//     return kt;
+// }
+
 /* calculate the fibonacci number at given offset */
 static ssize_t fib_read(struct file *file,
                         char *buf,
                         size_t size,
                         loff_t *offset)
 {
-    return (ssize_t) fib_sequence(*offset);
+    int flag = 0;
+    bn *result = bn_alloc(1);
+    kt = ktime_get();
+    switch (flag) {
+    case 0:
+        fib_sequence(result, *offset);
+        break;
+
+    default:
+        break;
+    }
+    char *p = bn_to_string(*result);
+    size_t len = strlen(p) + 1;
+    __copy_to_user(buf, p, len);
+    kt = ktime_sub(ktime_get(), kt);
+    bn_free(result);
+    kfree(p);
+
+    return kt;
+    // return (ssize_t) fib_time_proxy(*offset, buf, 0);
 }
 
 /* write operation is skipped */
@@ -69,7 +127,7 @@ static ssize_t fib_write(struct file *file,
                          size_t size,
                          loff_t *offset)
 {
-    return 1;
+    return ktime_to_ns(kt);
 }
 
 static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig)
